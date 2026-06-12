@@ -675,33 +675,24 @@ if st.button("✅ Guardar Modelo y Continuar", type="primary", use_container_wid
 if st.session_state.get("proyecciones"):
     st.markdown("---")
     st.subheader("⬇️ Descargar Pronósticos Guardados")
-    st.caption(
-        "El **Día Operativo** inicia a las 18:00 y cierra a las 17:59 del día siguiente, "
-        "de modo que los turnos nocturnos aparecen completos bajo una misma jornada. "
-        "Se exportan todos los departamentos guardados."
-    )
+    st.caption("Se exportan todos los departamentos guardados con la estimación hora a hora.")
 
     trozos = []
     for depto, df_dl in st.session_state["proyecciones"].items():
         df_dl = df_dl.copy()
         df_dl["fecha"] = pd.to_datetime(df_dl["fecha"])
-        df_dl["dia_operativo"] = df_dl.apply(
-            lambda r: r["fecha"].date() if r["hora"] >= 18
-            else (r["fecha"] - pd.Timedelta(days=1)).date(),
-            axis=1,
-        )
         df_dl["departamento"] = depto
         trozos.append(df_dl[[
-            "departamento", "dia_operativo", "fecha", "hora",
+            "departamento", "fecha", "hora",
             "estimacion_base", "factor", "estimacion_con_mundial",
         ]])
 
     df_export = pd.concat(trozos, ignore_index=True)
     df_export.columns = [
-        "Departamento", "Día Operativo", "Fecha Calendario", "Hora",
+        "Departamento", "Fecha", "Hora",
         "Est. Base", "Factor Partido", "Est. + Mundial",
     ]
-    df_export = df_export.sort_values(["Departamento", "Día Operativo", "Hora"]).reset_index(drop=True)
+    df_export = df_export.sort_values(["Departamento", "Fecha", "Hora"]).reset_index(drop=True)
 
     p_dl = st.session_state.get("parametros_modelo", {})
     deptos_str = "_".join(d.replace(" ", "_") for d in sorted(st.session_state["proyecciones"].keys()))
