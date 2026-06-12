@@ -344,47 +344,68 @@ st.markdown("---")
 st.subheader(f"📈 Serie Temporal Completa — {departamento_sel}")
 st.caption(f"P{percentil} | {semanas_historicas} semanas homólogas")
 
+mostrar_mundial = st.toggle(
+    "Mostrar Estimación + Mundial en el gráfico",
+    value=True,
+    help="Activa o desactiva la línea de estimación con factores de partidos del Mundial.",
+)
+
 todas_fechas = pd.date_range(FECHA_OBS_INI, FECHA_EST_FIN, freq="D")
 df_grafico = pd.DataFrame({"fecha": todas_fechas})
 df_grafico = df_grafico.merge(df_real_diario, on="fecha", how="left")
 df_grafico = df_grafico.merge(df_est_diario_base.rename(columns={"estimacion_base": "est_base"}), on="fecha", how="left")
 df_grafico = df_grafico.merge(df_est_diario_mundial.rename(columns={"estimacion_con_mundial": "est_mundial"}), on="fecha", how="left")
-df_grafico = df_grafico.set_index("fecha")
-df_grafico.columns = ["Demanda Real", f"Estimación Base (P{percentil})", "Estimación + Partidos"]
 
-st.line_chart(df_grafico, use_container_width=True)
+# Construir formato largo para Altair
+series_long = []
+for _, row in df_grafico.iterrows():
+    if pd.notna(row["demanda_real"]):
+        series_long.append({"fecha": row["fecha"], "valor": row["demanda_real"], "serie": "Demanda Real"})
+    if pd.notna(row["est_base"]):
+        series_long.append({"fecha": row["fecha"], "valor": row["est_base"], "serie": f"Estimación Base (P{percentil})"})
+    if mostrar_mundial and pd.notna(row["est_mundial"]):
+        series_long.append({"fecha": row["fecha"], "valor": row["est_mundial"], "serie": "Estimación + Mundial"})
 
-st.caption(
-    "🔵 **Demanda Real**: datos observados Ene–May | "
-    "🟠 **Estimación Base**: proyección sin factores | "
-    "🟢 **Estimación + Partidos**: proyección con factores de impacto aplicados"
+df_long = pd.DataFrame(series_long)
+
+color_scale = alt.Scale(
+    domain=["Demanda Real", f"Estimación Base (P{percentil})", "Estimación + Mundial"],
+    range=["#4C78A8", "#F58518", "#54A24B"],
 )
 
-# Métricas de backtesting
-st.markdown("---")
-st.markdown("**📐 Métricas de Backtesting (sobre período observado)**")
+_base = alt.Chart(df_long).encode(
+    x=alt.X(
+        "fecha:T",
+        title="Fecha",
+        scale=alt.Scale(domain=["2026-01-01", "2026-07-31"]),
+        axis=alt.Axis(format="%b %Y", tickCount="month", labelAngle=-45),
+    ),
+    y=alt.Y("valor:Q", title="Servicios diarios"),
+    color=alt.Color("serie:N", title="", scale=color_scale),
+)
 
-backtest_rows = []
-for fecha in pd.date_range(FECHA_OBS_INI, FECHA_OBS_FIN, freq="D"):
-    est_hora = estimar_hora_para_fecha(mat_hist, fecha, percentil, semanas_historicas)
-    est_total = est_hora.sum()
-    real_total = mat_hist.loc[fecha].sum() if fecha in mat_hist.index else 0
-    if real_total > 0:
-        backtest_rows.append({"real": real_total, "estimacion": est_total})
+_linea = _base.mark_line(strokeWidth=1.5)
 
-if backtest_rows:
-    df_bt = pd.DataFrame(backtest_rows)
-    mae = np.mean(np.abs(df_bt["real"] - df_bt["estimacion"]))
-    mape = np.mean(np.abs(df_bt["real"] - df_bt["estimacion"]) / df_bt["real"]) * 100
-    cobertura = (df_bt["estimacion"] >= df_bt["real"]).mean() * 100
+_puntos = _base.mark_circle(size=0, opacity=0).encode(
+    tooltip=[
+        alt.Tooltip("fecha:T", title="Fecha", format="%d %b %Y"),
+        alt.Tooltip("serie:N", title="Serie"),
+        alt.Tooltip("valor:Q", title="Servicios", format=".0f"),
+    ]
+).add_params(alt.selection_point(nearest=True, on="mouseover", fields=["fecha"], empty=False))
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("MAE", f"{mae:.1f} servicios")
-    with col2:
-        st.metric("MAPE", f"{mape:.1f}%")
-    with col3:
-        st.metric("Cobertura (Est ≥ Real)", f"{cobertura:.1f}%")
+chart_serie = (_linea + _puntos).properties(height=400).interactive(bind_y=False)
+
+st.altair_chart(chart_serie, use_container_width=True)
+
+leyenda = (
+    "🔵 **Demanda Real**: datos observados | "
+    f"🟠 **Estimación Base (P{percentil})**: proyección sin factores"
+)
+if mostrar_mundial:
+    leyenda += " | 🟢 **Estimación + Mundial**: proyección con factores de impacto aplicados"
+st.caption(leyenda)
+
 
 # =====================================================================
 # GRÁFICO 2: IMPACTO DE LOS FACTORES
@@ -495,6 +516,101 @@ with col_g2:
     )
     st.altair_chart(chart_alt_est, use_container_width=True)
     st.caption(f"Total base: {int(est_base_hora.sum())} | Total + partidos: {int(est_mundial_hora.sum())} servicios")
+
+# =====================================================================
+# GRÁFICO 4: SERVICIOS NOCTURNOS 6 PM → 6 AM (CRUZA MEDIANOCHE)
+# =====================================================================
+st.markdown("---")
+st.subheader("🌙 Servicios Nocturnos: 6 PM → 6 AM del día siguiente")
+st.markdown(
+    "Selecciona el día de **inicio** de la noche. "
+    "Se mostrarán los servicios estimados desde las **18:00** de ese día "
+    "hasta las **06:00** del día siguiente."
+)
+
+fechas_est_disp_noct = sorted(df_proyeccion["fecha"].dt.strftime("%Y-%m-%d").unique())
+
+fecha_noche_sel = st.selectbox(
+    "Día de inicio de la noche",
+    options=fechas_est_disp_noct,
+    key="fecha_noche",
+)
+
+fecha_noche_dt = pd.Timestamp(fecha_noche_sel)
+fecha_siguiente_dt = fecha_noche_dt + pd.Timedelta(days=1)
+
+HORAS_NOCHE = list(range(18, 24)) + list(range(0, 7))   # 18,19,...,23,0,1,...,6
+ETIQUETAS_NOCHE = [f"{h:02d}:00" for h in range(18, 24)] + [f"{h:02d}:00 (+1)" for h in range(0, 7)]
+
+filas_noche = []
+for i, h in enumerate(HORAS_NOCHE):
+    fecha_buscar = fecha_noche_dt if h >= 18 else fecha_siguiente_dt
+    sub = df_proyeccion[(df_proyeccion["fecha"] == fecha_buscar) & (df_proyeccion["hora"] == h)]
+    base_val    = int(sub["estimacion_base"].values[0])    if len(sub) else 0
+    mundial_val = int(sub["estimacion_con_mundial"].values[0]) if len(sub) else 0
+    filas_noche.append({
+        "Hora":          ETIQUETAS_NOCHE[i],
+        "orden":         i,
+        "Est. Base":     base_val,
+        "Est. + Mundial": mundial_val,
+    })
+
+df_noche = pd.DataFrame(filas_noche)
+df_noche_long = df_noche.melt(
+    id_vars=["Hora", "orden"],
+    value_vars=["Est. Base", "Est. + Mundial"],
+    var_name="Tipo",
+    value_name="Servicios",
+)
+
+# Si el toggle de mundial está apagado, ocultar esa serie
+if not mostrar_mundial:
+    df_noche_long = df_noche_long[df_noche_long["Tipo"] == "Est. Base"]
+
+orden_horas = df_noche["Hora"].tolist()
+
+chart_noche = (
+    alt.Chart(df_noche_long)
+    .mark_bar()
+    .encode(
+        x=alt.X("Hora:O", title="Hora", sort=orden_horas),
+        y=alt.Y("Servicios:Q", title="Servicios estimados"),
+        color=alt.Color(
+            "Tipo:N",
+            title="",
+            scale=alt.Scale(
+                domain=["Est. Base", "Est. + Mundial"],
+                range=["#F58518", "#54A24B"],
+            ),
+        ),
+        xOffset="Tipo:N",
+        tooltip=[
+            alt.Tooltip("Hora:O", title="Hora"),
+            alt.Tooltip("Tipo:N", title="Serie"),
+            alt.Tooltip("Servicios:Q", title="Servicios"),
+        ],
+    )
+    .properties(height=350)
+)
+
+st.altair_chart(chart_noche, use_container_width=True)
+
+# Totales de la noche
+total_base_noche    = df_noche["Est. Base"].sum()
+total_mundial_noche = df_noche["Est. + Mundial"].sum()
+
+dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+label_inicio  = f"{fecha_noche_sel} ({dias_semana[fecha_noche_dt.weekday()]})"
+label_fin     = f"{fecha_siguiente_dt.strftime('%Y-%m-%d')} ({dias_semana[fecha_siguiente_dt.weekday()]})"
+st.caption(f"🌙 Noche del **{label_inicio}** al **{label_fin}**")
+
+col_n1, col_n2 = st.columns(2)
+with col_n1:
+    st.metric("Total Est. Base (6 PM→6 AM)", f"{total_base_noche:,} servicios")
+with col_n2:
+    if mostrar_mundial:
+        st.metric("Total Est. + Mundial (6 PM→6 AM)", f"{total_mundial_noche:,} servicios",
+                  delta=f"+{total_mundial_noche - total_base_noche:,}" if total_mundial_noche > total_base_noche else "Sin impacto")
 
 # =====================================================================
 # BOTÓN GUARDAR MODELO
