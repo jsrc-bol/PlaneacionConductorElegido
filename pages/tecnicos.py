@@ -6,21 +6,24 @@ from scipy.optimize import linprog
 st.title("🎛️ Estimación de Técnicos — Optimización de Turnos")
 
 # =====================================================================
-# VALIDAR QUE EL MODELO FUE GUARDADO
+# VALIDAR QUE HAY AL MENOS UN MODELO GUARDADO
 # =====================================================================
-if "modelo_guardado" not in st.session_state or not st.session_state.get("modelo_guardado"):
+proyecciones: dict = st.session_state.get("proyecciones", {})
+
+if not proyecciones:
     st.warning(
-        "⚠️ No hay un modelo guardado. Ve a la página **Pronóstico y Calibración**, "
-        "ajusta los parámetros y haz clic en **Guardar Modelo**."
+        "⚠️ No hay modelos guardados. Ve a la página **Pronóstico y Calibración**, "
+        "selecciona cada departamento, ajusta los parámetros y haz clic en **Guardar Modelo**."
     )
     st.stop()
 
-df_proyeccion = st.session_state["proyeccion"].copy()
-params = st.session_state["parametros_modelo"]
+deptos_disponibles = sorted(proyecciones.keys())
+params = st.session_state.get("parametros_modelo", {})
 
 st.success(
-    f"Modelo cargado: P{params['percentil']} | {params['semanas_historicas']} semanas | "
-    f"{params['departamento']}"
+    f"Modelo cargado para: **{', '.join(deptos_disponibles)}** — "
+    f"P{params.get('percentil','?')} | {params.get('semanas_historicas','?')} semanas | "
+    f"Ruta Bolívar {params.get('pct_bolivar', 100)}%"
 )
 
 # =====================================================================
@@ -50,7 +53,7 @@ if not duraciones_seleccionadas:
 st.sidebar.markdown("**💰 Costo por Tipo de Turno:**")
 costos_turno = {}
 for dur in sorted(duraciones_seleccionadas):
-    default_cost = round(3.0 + (dur - 3) * 0.25, 1)  # Escalado base
+    default_cost = round(3.0 + (dur - 3) * 0.25, 1)
     costos_turno[dur] = st.sidebar.number_input(
         f"Costo Turno {dur}h", value=default_cost, step=0.5, min_value=0.5, key=f"costo_{dur}h",
     )
@@ -69,85 +72,88 @@ penalizacion = st.sidebar.number_input(
 # EJECUTAR OPTIMIZACIÓN
 # =====================================================================
 if st.sidebar.button("🚀 Correr Optimización", use_container_width=True):
-    with st.spinner("Resolviendo optimización matemática..."):
-        try:
-            departamento = params["departamento"]
-            df_dept = df_proyeccion.copy().reset_index(drop=True)
-            T = len(df_dept)
-            D = df_dept["estimacion_con_mundial"].values
+    all_shifts = []
+    errores = []
 
-            # Generar variables válidas para cada duración de turno
-            turnos_config = []  # Lista de (duración, indices_válidos, costo)
-            for dur in sorted(duraciones_seleccionadas):
-                valid_indices = [
-                    t for t in range(T)
-                    if (df_dept.loc[t, "hora"] >= 18 or df_dept.loc[t, "hora"] <= 5)
-                    and t <= T - dur
-                ]
-                turnos_config.append((dur, valid_indices, costos_turno[dur]))
+    with st.spinner("Resolviendo optimización matemática para cada departamento..."):
+        for departamento, df_proy in proyecciones.items():
+            try:
+                df_dept = df_proy.copy().reset_index(drop=True)
+                T = len(df_dept)
+                D = df_dept["estimacion_con_mundial"].values
 
-            # Calcular total de variables de turno
-            total_turno_vars = sum(len(indices) for _, indices, _ in turnos_config)
-            num_vars = total_turno_vars + T  # + variables de slack (demanda incumplida)
+                turnos_config = []
+                for dur in sorted(duraciones_seleccionadas):
+                    valid_indices = [
+                        t for t in range(T)
+                        if (df_dept.loc[t, "hora"] >= 18 or df_dept.loc[t, "hora"] <= 5)
+                        and t <= T - dur
+                    ]
+                    turnos_config.append((dur, valid_indices, costos_turno[dur]))
 
-            # Vector de costos
-            c = []
-            for dur, indices, costo in turnos_config:
-                c.extend([costo] * len(indices))
-            c.extend([penalizacion] * T)
+                total_turno_vars = sum(len(indices) for _, indices, _ in turnos_config)
+                num_vars = total_turno_vars + T
 
-            # Restricciones: para cada slot t, la cobertura debe >= demanda
-            A_ub, b_ub = [], []
-            for t in range(T):
-                row = [0.0] * num_vars
-                h = df_dept.loc[t, "hora"]
-                demanda_objetivo = D[t] if (h >= 18 or h <= 6) else 0.0
+                c = []
+                for dur, indices, costo in turnos_config:
+                    c.extend([costo] * len(indices))
+                c.extend([penalizacion] * T)
 
-                # Para cada tipo de turno, ver qué turnos cubren el slot t
-                offset = 0
-                for dur, indices, _ in turnos_config:
-                    for idx, s in enumerate(indices):
-                        if s <= t <= s + dur - 1:
-                            row[offset + idx] = -productividad
-                    offset += len(indices)
+                A_ub, b_ub = [], []
+                for t in range(T):
+                    row = [0.0] * num_vars
+                    h = df_dept.loc[t, "hora"]
+                    demanda_objetivo = D[t] if (h >= 18 or h <= 6) else 0.0
 
-                # Variable de slack
-                row[total_turno_vars + t] = -1.0
-                A_ub.append(row)
-                b_ub.append(-demanda_objetivo)
+                    offset = 0
+                    for dur, indices, _ in turnos_config:
+                        for idx, s in enumerate(indices):
+                            if s <= t <= s + dur - 1:
+                                row[offset + idx] = -productividad
+                        offset += len(indices)
 
-            # Resolver
-            integrality = [1] * total_turno_vars + [0] * T
-            res = linprog(
-                c, A_ub=A_ub, b_ub=b_ub,
-                bounds=[(0, None)] * num_vars,
-                integrality=integrality,
-            )
+                    row[total_turno_vars + t] = -1.0
+                    A_ub.append(row)
+                    b_ub.append(-demanda_objetivo)
 
-            shift_rows = []
-            if res.success:
-                offset = 0
-                for dur, indices, _ in turnos_config:
-                    X = np.round(res.x[offset:offset + len(indices)]).astype(int)
-                    for idx, s in enumerate(indices):
-                        if X[idx] > 0:
-                            row_data = df_dept.loc[s]
-                            shift_rows.append({
-                                "Fecha": pd.Timestamp(row_data["fecha"]).strftime("%Y-%m-%d"),
-                                "Servicios Estimados": int(sum(D[s:s + dur])),
-                                "Hora inicio": f"{int(row_data['hora'])}:00",
-                                "Hora final": f"{int((row_data['hora'] + dur) % 24)}:00",
-                                "Duracion de turno": f"{dur} Horas",
-                                "Departamento": departamento,
-                                "# de turnos": X[idx],
-                            })
-                    offset += len(indices)
+                integrality = [1] * total_turno_vars + [0] * T
+                res = linprog(
+                    c, A_ub=A_ub, b_ub=b_ub,
+                    bounds=[(0, None)] * num_vars,
+                    integrality=integrality,
+                )
 
-            df_malla = pd.DataFrame(shift_rows)
-            st.session_state["malla_simulada"] = df_malla
-            st.success("🎯 Optimización completada.")
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
+                if res.success:
+                    offset = 0
+                    for dur, indices, _ in turnos_config:
+                        X = np.round(res.x[offset:offset + len(indices)]).astype(int)
+                        for idx, s in enumerate(indices):
+                            if X[idx] > 0:
+                                row_data = df_dept.loc[s]
+                                all_shifts.append({
+                                    "Fecha": pd.Timestamp(row_data["fecha"]).strftime("%Y-%m-%d"),
+                                    "Servicios Estimados": int(sum(D[s:s + dur])),
+                                    "Hora inicio": f"{int(row_data['hora'])}:00",
+                                    "Hora final": f"{int((row_data['hora'] + dur) % 24)}:00",
+                                    "Duracion de turno": f"{dur} Horas",
+                                    "Departamento": departamento,
+                                    "# de turnos": X[idx],
+                                })
+                        offset += len(indices)
+                else:
+                    errores.append(f"{departamento}: el optimizador no encontró solución.")
+
+            except Exception as e:
+                errores.append(f"{departamento}: {e}")
+
+    if errores:
+        for msg in errores:
+            st.error(f"❌ {msg}")
+
+    df_malla = pd.DataFrame(all_shifts)
+    st.session_state["malla_simulada"] = df_malla
+    if not df_malla.empty:
+        st.success(f"🎯 Optimización completada para: {', '.join(deptos_disponibles)}.")
 
 # =====================================================================
 # RESULTADOS
@@ -157,7 +163,19 @@ st.write("---")
 if "malla_simulada" in st.session_state and not st.session_state["malla_simulada"].empty:
     df_res = st.session_state["malla_simulada"].copy()
 
-    # KPIs dinámicos según duraciones en los resultados
+    # --- FILTRO DE DEPARTAMENTO ---
+    deptos_en_resultado = sorted(df_res["Departamento"].unique().tolist())
+    opciones_filtro = ["Todos"] + deptos_en_resultado
+    filtro_depto = st.selectbox(
+        "🔍 Filtrar por Departamento",
+        options=opciones_filtro,
+        index=0,
+        key="filtro_depto_tecnicos",
+    )
+    if filtro_depto != "Todos":
+        df_res = df_res[df_res["Departamento"] == filtro_depto].copy()
+
+    # KPIs dinámicos
     duraciones_resultado = sorted(df_res["Duracion de turno"].unique())
     cols_kpi = st.columns(min(len(duraciones_resultado) + 1, 4))
     with cols_kpi[0]:
@@ -197,7 +215,6 @@ if "malla_simulada" in st.session_state and not st.session_state["malla_simulada
     elif vista_matriz == "Servicios estimados":
         st.dataframe(matriz_servicios, use_container_width=True)
     else:
-        # Combinada: "turnos (servicios)"
         matriz_combinada = matriz_pivot.copy().astype(str)
         for col in matriz_pivot.columns:
             for idx in matriz_pivot.index:
