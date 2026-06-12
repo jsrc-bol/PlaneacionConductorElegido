@@ -105,6 +105,17 @@ departamento_sel = st.sidebar.selectbox(
     options=sorted(df_hist["DEPARTAMENTO"].unique().tolist()),
 )
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("**🚌 Ruta Bolívar**")
+pct_bolivar = st.sidebar.slider(
+    "% de Operación Ruta Bolívar",
+    min_value=0, max_value=100, value=100, step=5,
+    help=(
+        "Porcentaje de la demanda estimada que atenderá Ruta Bolívar. "
+        "Ej: 50% → todas las estimaciones se reducen a la mitad."
+    ),
+)
+
 # =====================================================================
 # TABLAS EDITABLES DE PARTIDOS
 # =====================================================================
@@ -320,6 +331,11 @@ mat_hist = construir_matriz_historica(df_hist, departamento_sel)
 df_proyeccion = calcular_proyeccion_desde_tablas(
     mat_hist, percentil, semanas_historicas, df_col_edit, df_otros_edit
 )
+
+# Aplicar % de operación Ruta Bolívar
+factor_bolivar = pct_bolivar / 100.0
+df_proyeccion["estimacion_base"] = (df_proyeccion["estimacion_base"] * factor_bolivar).round(1)
+df_proyeccion["estimacion_con_mundial"] = (df_proyeccion["estimacion_con_mundial"] * factor_bolivar).round(1)
 
 # Demanda real diaria (observada)
 df_real_diario = (
@@ -618,22 +634,88 @@ with col_n2:
 st.markdown("---")
 st.subheader("💾 Guardar Modelo")
 st.markdown(
-    "Una vez conforme con la calibración, guarda el modelo. "
-    "Esto fijará la proyección actual y la pasará a la página de **Estimación de Técnicos**."
+    "Al guardar, se calcula la proyección con estos parámetros para **todos los departamentos** "
+    "y se pasan a la página de **Estimación de Técnicos**."
 )
 
 if st.button("✅ Guardar Modelo y Continuar", type="primary", use_container_width=True):
-    st.session_state["modelo_guardado"] = True
-    st.session_state["proyeccion"] = df_proyeccion.copy()
-    st.session_state["parametros_modelo"] = {
+    todos_deptos = sorted(df_hist["DEPARTAMENTO"].unique().tolist())
+    proyecciones_nuevas = {}
+
+    for depto in todos_deptos:
+        mat = construir_matriz_historica(df_hist, depto)
+        proy = calcular_proyeccion_desde_tablas(
+            mat, percentil, semanas_historicas, df_col_edit, df_otros_edit
+        )
+        proy["estimacion_base"] = (proy["estimacion_base"] * (pct_bolivar / 100.0)).round(1)
+        proy["estimacion_con_mundial"] = (proy["estimacion_con_mundial"] * (pct_bolivar / 100.0)).round(1)
+        proyecciones_nuevas[depto] = proy
+
+    params_guardados = {
         "percentil": percentil,
         "semanas_historicas": semanas_historicas,
-        "departamento": departamento_sel,
+        "pct_bolivar": pct_bolivar,
         "partidos_colombia": df_col_edit.to_dict("records"),
         "partidos_otros": df_otros_edit.to_dict("records"),
     }
+
+    st.session_state["proyecciones"] = proyecciones_nuevas
+    st.session_state["parametros_modelo"] = params_guardados
+    st.session_state["modelo_guardado"] = True
+
     st.success(
-        f"✅ Modelo guardado: P{percentil}, {semanas_historicas} semanas, "
-        f"{len(df_col_edit)} partidos Colombia, {len(df_otros_edit)} otros partidos. "
+        f"✅ Modelo guardado para: **{', '.join(todos_deptos)}** — "
+        f"P{percentil}, {semanas_historicas} semanas, Ruta Bolívar {pct_bolivar}%. "
         f"Ve a **Estimación de Técnicos** →"
+    )
+
+# =====================================================================
+# DESCARGA DE PRONÓSTICOS (día operativo 18:00 → 17:59 del día siguiente)
+# =====================================================================
+if st.session_state.get("proyecciones"):
+    st.markdown("---")
+    st.subheader("⬇️ Descargar Pronósticos Guardados")
+    st.caption(
+        "El **Día Operativo** inicia a las 18:00 y cierra a las 17:59 del día siguiente, "
+        "de modo que los turnos nocturnos aparecen completos bajo una misma jornada. "
+        "Se exportan todos los departamentos guardados."
+    )
+
+    trozos = []
+    for depto, df_dl in st.session_state["proyecciones"].items():
+        df_dl = df_dl.copy()
+        df_dl["fecha"] = pd.to_datetime(df_dl["fecha"])
+        df_dl["dia_operativo"] = df_dl.apply(
+            lambda r: r["fecha"].date() if r["hora"] >= 18
+            else (r["fecha"] - pd.Timedelta(days=1)).date(),
+            axis=1,
+        )
+        df_dl["departamento"] = depto
+        trozos.append(df_dl[[
+            "departamento", "dia_operativo", "fecha", "hora",
+            "estimacion_base", "factor", "estimacion_con_mundial",
+        ]])
+
+    df_export = pd.concat(trozos, ignore_index=True)
+    df_export.columns = [
+        "Departamento", "Día Operativo", "Fecha Calendario", "Hora",
+        "Est. Base", "Factor Partido", "Est. + Mundial",
+    ]
+    df_export = df_export.sort_values(["Departamento", "Día Operativo", "Hora"]).reset_index(drop=True)
+
+    p_dl = st.session_state.get("parametros_modelo", {})
+    deptos_str = "_".join(d.replace(" ", "_") for d in sorted(st.session_state["proyecciones"].keys()))
+    nombre_archivo = (
+        f"pronostico_{deptos_str}"
+        f"_P{p_dl.get('percentil','')}"
+        f"_bolivar{p_dl.get('pct_bolivar', 100)}pct.csv"
+    )
+
+    csv_bytes = df_export.to_csv(index=False, sep=";").encode("utf-8")
+    st.download_button(
+        label="💾 Descargar Pronósticos — Todos los Departamentos (CSV)",
+        data=csv_bytes,
+        file_name=nombre_archivo,
+        mime="text/csv",
+        use_container_width=True,
     )
