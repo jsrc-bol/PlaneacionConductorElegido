@@ -322,6 +322,22 @@ def calcular_proyeccion_desde_tablas(
 
     return df_proy[["fecha", "hora", "estimacion_base", "factor", "estimacion_con_mundial"]].copy()
 
+def aplicar_piso_minimo(df_proy: pd.DataFrame, piso: float = 1.0) -> pd.DataFrame:
+    """Garantiza un mínimo de `piso` por celda (Depto, Fecha, Hora),
+    SOLO en horario nocturno 6 PM → 6 AM (18:00–23:00 y 00:00–06:00),
+    que es donde se concentra la operación de Conductor Elegido.
+    Fuera de ese rango (07:00–17:00) la estimación se deja intacta.
+    """
+    df_proy = df_proy.copy()
+    # Nocturno: 6 PM en adelante (hora >= 18) o hasta las 6 AM (hora <= 6)
+    mask_noche = (df_proy["hora"] >= 18) | (df_proy["hora"] <= 6)
+    df_proy.loc[mask_noche, "estimacion_base"] = (
+        df_proy.loc[mask_noche, "estimacion_base"].clip(lower=piso)
+    )
+    df_proy.loc[mask_noche, "estimacion_con_mundial"] = (
+        df_proy.loc[mask_noche, "estimacion_con_mundial"].clip(lower=piso)
+    )
+    return df_proy
 
 # =====================================================================
 # CÁLCULOS PRINCIPALES
@@ -336,6 +352,8 @@ df_proyeccion = calcular_proyeccion_desde_tablas(
 factor_bolivar = pct_bolivar / 100.0
 df_proyeccion["estimacion_base"] = (df_proyeccion["estimacion_base"] * factor_bolivar).round(1)
 df_proyeccion["estimacion_con_mundial"] = (df_proyeccion["estimacion_con_mundial"] * factor_bolivar).round(1)
+
+df_proyeccion = aplicar_piso_minimo(df_proyeccion, piso=1)
 
 # Demanda real diaria (observada)
 df_real_diario = (
@@ -649,6 +667,7 @@ if st.button("✅ Guardar Modelo y Continuar", type="primary", use_container_wid
         )
         proy["estimacion_base"] = (proy["estimacion_base"] * (pct_bolivar / 100.0)).round(1)
         proy["estimacion_con_mundial"] = (proy["estimacion_con_mundial"] * (pct_bolivar / 100.0)).round(1)
+        proy = aplicar_piso_minimo(proy, piso=1)
         proyecciones_nuevas[depto] = proy
 
     params_guardados = {
