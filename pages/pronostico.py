@@ -51,8 +51,8 @@ El modelo afecta todas las horas dentro de esa ventana en el día del partido.
 ARCHIVO_HISTORICO = "DIM.csv"
 
 FECHA_OBS_INI = pd.Timestamp("2025-01-01")
-FECHA_OBS_FIN = pd.Timestamp("2026-06-18")
-FECHA_EST_INI = pd.Timestamp("2026-06-19")
+FECHA_OBS_FIN = pd.Timestamp("2026-06-28")
+FECHA_EST_INI = pd.Timestamp("2026-06-29")
 FECHA_EST_FIN = pd.Timestamp("2026-07-20")
 
 
